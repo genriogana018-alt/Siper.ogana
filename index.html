@@ -1,1 +1,455 @@
+/*
+Siper.Ogana — React prototype (full modern upgrade)
+Features added in this update:
+- Page transitions and element animations using framer-motion (page-level transitions and subtle element fades).
+- Preloader (splash) with animated logo shown once on initial load.
+- Change-password functionality for any logged-in user; admin can change own password too.
+- Autosave drafts for chapters and news while editing (stored in localStorage with keys: siperdraft_chapter_<id?> and siperdraft_news_<id?>).
+- Toast notification system (small toasts in top-right corner).
+- Dark mode toggle (preference saved in localStorage).
+- Improved responsive modern light-green design with glass effect and smooth interactions.
+- Defensive checks for localStorage and robust CRUD for chapters/news (only admin can modify content).
+- Smooth scroll-to-top on route changes.
 
+Notes (important):
+- This is a frontend-only demo. For production use a proper backend (auth, password hashing, file storage).
+- framer-motion is referenced (import); when you set up the project, install it: npm i framer-motion
+
+How to use:
+- Default admin: HenryOgana / Siper123 (change it immediately after login).
+- Login, then go to Admin panel to manage chapters and news; any logged-in user can change their own password via "Profile".
+
+File: src/App.jsx (single-file prototype)
+*/
+
+import React, { useEffect, useState, useRef } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+
+// Local storage keys
+const LS_USER_KEY = "siper_user";
+const LS_USERS_KEY = "siper_users";
+const LS_CHAPTERS_KEY = "siper_chapters";
+const LS_NEWS_KEY = "siper_news";
+const LS_HOME_KEY = "siper_home_intro";
+const LS_THEME_KEY = "siper_theme"; // 'light' or 'dark'
+
+// Helpers
+function safeParse(raw, fallback){ try { return raw ? JSON.parse(raw) : fallback; } catch(e) { return fallback; } }
+function genId(){ return Date.now() + Math.floor(Math.random()*1000); }
+
+// Default data initializers
+function defaultUsers(){
+  return [{ username: "HenryOgana", password: btoa("Siper123") }];
+}
+function loadUsers(){ return safeParse(localStorage.getItem(LS_USERS_KEY), defaultUsers()); }
+function saveUsers(u){ localStorage.setItem(LS_USERS_KEY, JSON.stringify(u)); }
+function loadChapters(){ return safeParse(localStorage.getItem(LS_CHAPTERS_KEY), []); }
+function saveChapters(c){ localStorage.setItem(LS_CHAPTERS_KEY, JSON.stringify(c)); }
+function loadNews(){ return safeParse(localStorage.getItem(LS_NEWS_KEY), []); }
+function saveNews(n){ localStorage.setItem(LS_NEWS_KEY, JSON.stringify(n)); }
+function loadIntro(){ return localStorage.getItem(LS_HOME_KEY) || 'Персональный сайт для публикации частей книги. Только автор HenryOgana имеет права администратора.'; }
+function saveIntro(txt){ localStorage.setItem(LS_HOME_KEY, txt); }
+function loadUserFromStorage(){ return safeParse(localStorage.getItem(LS_USER_KEY), null); }
+function saveUserToStorage(u){ localStorage.setItem(LS_USER_KEY, JSON.stringify(u)); }
+function loadTheme(){ return localStorage.getItem(LS_THEME_KEY) || 'light'; }
+function saveTheme(t){ localStorage.setItem(LS_THEME_KEY, t); }
+
+// Toast system
+function useToasts(){ const [toasts, setToasts] = useState([]);
+  useEffect(()=>{ if(toasts.length===0) return; const timers = toasts.map(t => setTimeout(()=>{ setToasts(prev => prev.filter(x => x.id !== t.id)); }, 4000)); return ()=>timers.forEach(clearTimeout); },[toasts]);
+  function push(message, type='info'){ const id = genId(); setToasts(prev => [...prev, { id, message, type }]); }
+  return { toasts, push, remove: id => setToasts(prev=>prev.filter(t=>t.id!==id)) };
+}
+
+// Preloader component
+function Preloader({onDone}){
+  useEffect(()=>{ const t = setTimeout(()=>onDone(), 900); return ()=>clearTimeout(t); },[onDone]);
+  return (
+    <div className="fixed inset-0 bg-white/90 dark:bg-gray-900/90 flex items-center justify-center z-50">
+      <motion.div initial={{scale:0.8,opacity:0}} animate={{scale:1,opacity:1}} transition={{duration:0.6, ease:'easeOut'}} className="flex flex-col items-center gap-3">
+        <motion.div animate={{rotate:360}} transition={{repeat:Infinity, duration:8, ease:'linear'}} className="w-20 h-20 rounded-2xl bg-gradient-to-tr from-emerald-400 to-green-600 flex items-center justify-center shadow-lg text-white text-2xl font-extrabold">SO</motion.div>
+        <motion.div initial={{opacity:0}} animate={{opacity:1}} transition={{delay:0.3}} className="text-sm text-gray-600">Siper.Ogana — загружается...</motion.div>
+      </motion.div>
+    </div>
+  );
+}
+
+// Page transition variants
+const pageVariants = { initial: { opacity: 0, y: 10 }, in: { opacity: 1, y: 0 }, out: { opacity: 0, y: -8 } };
+const pageTransition = { type: 'tween', duration: 0.45 };
+
+export default function App(){
+  const [users, setUsers] = useState(loadUsers());
+  const [user, setUser] = useState(loadUserFromStorage());
+  const [chapters, setChapters] = useState(loadChapters());
+  const [news, setNews] = useState(loadNews());
+  const [intro, setIntro] = useState(loadIntro());
+  const [route, setRoute] = useState('home');
+  const [loading, setLoading] = useState(true);
+  const [theme, setTheme] = useState(loadTheme());
+
+  // Add missing editing states to avoid ReferenceError
+  const [editingChapter, setEditingChapter] = useState(null);
+  const [editingNews, setEditingNews] = useState(null);
+
+  const toast = useToasts();
+
+  const isAdmin = user && user.username && user.username.toLowerCase() === 'henryogana';
+
+  // Preloader on mount
+  useEffect(()=>{ const t = setTimeout(()=>setLoading(false), 900); return ()=>clearTimeout(t); },[]);
+
+  // Persist data
+  useEffect(()=> saveUsers(users), [users]);
+  useEffect(()=> saveChapters(chapters), [chapters]);
+  useEffect(()=> saveNews(news), [news]);
+  useEffect(()=> saveIntro(intro), [intro]);
+  useEffect(()=> saveTheme(theme), [theme]);
+
+  // Scroll to top on route change
+  useEffect(()=>{ window.scrollTo({ top: 0, behavior: 'smooth' }); },[route]);
+
+  // Auth
+  function register(username, password){ if (!username||!password) return toast.push('Введите логин и пароль','error'); if(users.find(u=>u.username.toLowerCase()===username.toLowerCase())) return toast.push('Имя занято','error'); const newUser = { username, password: btoa(password) }; setUsers(prev=>[...prev,newUser]); toast.push('Регистрация успешна. Войдите.','success'); }
+  function login(username, password){ const found = users.find(u=>u.username.toLowerCase()===username.toLowerCase()); if(!found){ toast.push('Пользователь не найден','error'); return false; } if(found.password !== btoa(password)){ toast.push('Неверный пароль','error'); return false; } setUser(found); saveUserToStorage(found); toast.push('Вход выполнен','success'); setRoute('home'); return true; }
+  function logout(){ setUser(null); localStorage.removeItem(LS_USER_KEY); toast.push('Вы вышли','info'); }
+
+  // Password change (for current user)
+  function changePasswordForUser(username, oldPass, newPass){ const idx = users.findIndex(u=>u.username.toLowerCase()===username.toLowerCase()); if(idx===-1) return toast.push('Пользователь не найден','error'); if(users[idx].password !== btoa(oldPass)) return toast.push('Старый пароль неверен','error'); const copy = [...users]; copy[idx] = { ...copy[idx], password: btoa(newPass) }; setUsers(copy); // if current user changed own password, update storage
+    if(user && user.username.toLowerCase()===username.toLowerCase()){ saveUserToStorage(copy[idx]); setUser(copy[idx]); }
+    toast.push('Пароль обновлён','success'); }
+
+  // Chapters CRUD (admin only)
+  function addChapter(data){ if(!isAdmin) return toast.push('Только админ может добавлять главы','error'); const item = { id: genId(), ...data }; setChapters(prev=>[item,...prev]); toast.push('Глава добавлена','success'); }
+  function updateChapter(id,data){ if(!isAdmin) return toast.push('Только админ','error'); setChapters(prev=>prev.map(c=>c.id===id?{...c,...data}:c)); toast.push('Глава обновлена','success'); }
+  function deleteChapter(id){ if(!isAdmin) return toast.push('Только админ','error'); if(!confirm('Удалить главу?')) return; setChapters(prev=>prev.filter(c=>c.id!==id)); toast.push('Глава удалена','info'); }
+
+  // News CRUD (admin only)
+  function addNews(data){ if(!isAdmin) return toast.push('Только админ может добавлять новости','error'); const item = { id: genId(), ...data }; setNews(prev=>[item,...prev]); toast.push('Новость добавлена','success'); }
+  function updateNews(id,data){ if(!isAdmin) return toast.push('Только админ','error'); setNews(prev=>prev.map(n=>n.id===id?{...n,...data}:n)); toast.push('Новость обновлена','success'); }
+  function deleteNews(id){ if(!isAdmin) return toast.push('Только админ','error'); if(!confirm('Удалить новость?')) return; setNews(prev=>prev.filter(n=>n.id!==id)); toast.push('Новость удалена','info'); }
+
+  // Theme toggle
+  function toggleTheme(){ setTheme(prev=> prev==='light' ? 'dark' : 'light'); }
+
+  // Autosave helpers for EditForm: drafts saved under siperdraft_chapter_<id?> or siperdraft_news_<id?>
+  function saveDraft(type, idOrTemp, data){ try{ const key = `siperdraft_${type}_${idOrTemp||'new'}`; localStorage.setItem(key, JSON.stringify(data)); toast.push('Черновик сохранен','info'); }catch(e){} }
+  function loadDraft(type, idOrTemp){ try{ const key = `siperdraft_${type}_${idOrTemp||'new'}`; return safeParse(localStorage.getItem(key), null); }catch(e){ return null; } }
+  function clearDraft(type, idOrTemp){ try{ const key = `siperdraft_${type}_${idOrTemp||'new'}`; localStorage.removeItem(key); }catch(e){} }
+
+  // Render
+  return (
+    <div className={`${theme==='dark' ? 'dark' : ''}`}>
+      <div className="min-h-screen bg-gradient-to-br dark:bg-gray-900 from-green-50 to-white dark:from-gray-800 dark:to-gray-900 text-gray-900 dark:text-gray-100 transition-colors">
+        {loading && <Preloader onDone={()=>setLoading(false)} />}
+
+        <header className="sticky top-0 z-40">
+          <div className="backdrop-blur bg-white/60 dark:bg-gray-800/60 border-b">
+            <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-emerald-400 to-green-600 flex items-center justify-center text-white font-bold shadow">SO</div>
+                <div>
+                  <div className="text-xl font-extrabold">Siper.Ogana</div>
+                  <div className="text-sm text-gray-500 dark:text-gray-400">Авторский сайт — Миссисипи</div>
+                </div>
+              </div>
+
+              <nav className="flex items-center gap-3">
+                <NavItem label="Главная" active={route==='home'} onClick={()=>setRoute('home')} />
+                <NavItem label="Книга" active={route==='book'} onClick={()=>setRoute('book')} />
+                <NavItem label="Новости" active={route==='news'} onClick={()=>setRoute('news')} />
+                <NavItem label="О нас" active={route==='about'} onClick={()=>setRoute('about')} />
+                <div className="flex items-center gap-2">
+                  <button onClick={toggleTheme} className="px-3 py-1 rounded-md bg-green-100 hover:bg-green-200">{theme==='light' ? 'Темная' : 'Светлая'}</button>
+                  {user ? (
+                    <div className="flex items-center gap-2">
+                      <div className="px-3 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-sm">{user.username}{isAdmin? ' • Admin' : ''}</div>
+                      <button onClick={logout} className="px-3 py-1 bg-green-700 text-white rounded-md">Выйти</button>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2">
+                      <button onClick={()=>setRoute('login')} className="px-3 py-1 bg-green-600 text-white rounded-md">Войти</button>
+                    </div>
+                  )}
+                </div>
+              </nav>
+            </div>
+          </div>
+        </header>
+
+        <main className="max-w-6xl mx-auto p-6">
+          <AnimatePresence mode="wait" initial={false} exitBeforeEnter>
+            <motion.div key={route} initial="initial" animate="in" exit="out" variants={pageVariants} transition={pageTransition} className="min-h-[60vh]">
+
+              {route==='home' && (
+                <section className="p-6 bg-white dark:bg-gray-800 rounded-2xl shadow-md">
+                  <div className="flex items-start justify-between gap-6">
+                    <div className="flex-1">
+                      <h1 className="text-3xl font-extrabold text-green-800 dark:text-green-300">Миссисипи</h1>
+                      {isAdmin ? (
+                        <textarea value={intro} onChange={e=>setIntro(e.target.value)} rows={4} className="mt-4 w-full p-3 border rounded-lg bg-green-50 dark:bg-gray-700" />
+                      ) : (
+                        <p className="mt-4 text-gray-700 dark:text-gray-300 leading-relaxed">{intro}</p>
+                      )}
+                      <div className="mt-4 flex gap-3">
+                        <button onClick={()=>setRoute('book')} className="px-4 py-2 rounded-lg bg-green-700 text-white">Читать книгу</button>
+                        <button onClick={()=>setRoute('news')} className="px-4 py-2 rounded-lg border">Новости</button>
+                      </div>
+                    </div>
+                    <div className="w-56 p-4 rounded-xl bg-gradient-to-tr from-green-50 to-white shadow-sm hidden md:block">
+                      <div className="text-sm text-gray-500">Автор</div>
+                      <div className="mt-3 font-semibold">{isAdmin ? 'HenryOgana (Admin)' : 'HenryOgana'}</div>
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {route==='book' && (
+                <section className="p-6 bg-white dark:bg-gray-800 rounded-2xl shadow-md">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-2xl font-semibold text-green-800 dark:text-green-300">Главы</h2>
+                    {isAdmin && <button onClick={()=>setRoute('admin')} className="px-4 py-2 bg-green-700 text-white rounded-lg">Админ-панель</button>}
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {chapters.length===0 && <div className="p-4 text-gray-500">Пока нет глав — добавьте первую в админ-панели.</div>}
+                    {chapters.map(c=> (
+                      <motion.article layout key={c.id} className="p-4 bg-green-50 dark:bg-gray-700 rounded-xl shadow-sm">
+                        <div className="flex justify-between">
+                          <div>
+                            <h3 className="font-semibold text-lg text-green-800 dark:text-green-200">{c.title}</h3>
+                            <p className="mt-2 text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{c.content}</p>
+                          </div>
+                          <div className="flex flex-col gap-2">
+                            {isAdmin && <button onClick={()=>{ setEditingChapter(c); setRoute('admin'); }} className="px-3 py-1 bg-green-200 rounded">Ред.</button>}
+                            {isAdmin && <button onClick={()=>deleteChapter(c.id)} className="px-3 py-1 bg-red-500 text-white rounded">Удалить</button>}
+                          </div>
+                        </div>
+                      </motion.article>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {route==='news' && (
+                <section className="p-6 bg-white dark:bg-gray-800 rounded-2xl shadow-md">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-2xl font-semibold text-green-800 dark:text-green-300">Новости</h2>
+                    {isAdmin && <button onClick={()=>{ setEditingNews({}); setRoute('admin'); }} className="px-4 py-2 bg-green-700 text-white rounded-lg">Добавить новость</button>}
+                  </div>
+                  <div className="space-y-4">
+                    {news.length===0 && <div className="text-gray-500">Пусто — добавьте новость.</div>}
+                    {news.map(n=> (
+                      <motion.div key={n.id} layout className="p-4 bg-green-50 dark:bg-gray-700 rounded-xl flex justify-between items-start">
+                        <div>
+                          <h3 className="font-semibold text-green-800 dark:text-green-200">{n.title}</h3>
+                          <p className="text-gray-700 dark:text-gray-300 mt-2 whitespace-pre-wrap">{n.body}</p>
+                        </div>
+                        <div className="flex flex-col gap-2">
+                          {isAdmin && <button onClick={()=>{ setEditingNews(n); setRoute('admin'); }} className="px-3 py-1 bg-green-200 rounded">Ред.</button>}
+                          {isAdmin && <button onClick={()=>deleteNews(n.id)} className="px-3 py-1 bg-red-500 text-white rounded">Удалить</button>}
+                        </div>
+                      </motion.div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {route==='about' && (
+                <section className="p-6 bg-white dark:bg-gray-800 rounded-2xl shadow-md">
+                  <h2 className="text-2xl font-semibold text-green-800 dark:text-green-300">О проекте</h2>
+                  <p className="mt-3 text-gray-700 dark:text-gray-300">Siper.Ogana — персональный сайт автора HenryOgana, где публикуется книга «Миссисипи».</p>
+                </section>
+              )}
+
+              {route==='login' && (
+                <section className="p-6">
+                  <AuthCard onLogin={login} onRegister={register} onClose={()=>setRoute('home')} />
+                </section>
+              )}
+
+              {route==='admin' && (
+                <section className="p-6 bg-white dark:bg-gray-800 rounded-2xl shadow-md">
+                  {isAdmin ? (
+                    <AdminPanel 
+                      chapters={chapters}
+                      news={news}
+                      addChapter={addChapter}
+                      updateChapter={updateChapter}
+                      deleteChapter={deleteChapter}
+                      addNews={addNews}
+                      updateNews={updateNews}
+                      deleteNews={deleteNews}
+                      intro={intro}
+                      setIntro={setIntro}
+                      users={users}
+                      changePasswordForUser={changePasswordForUser}
+                      toast={toast}
+                      editingChapter={editingChapter}
+                      setEditingChapter={setEditingChapter}
+                      editingNews={editingNews}
+                      setEditingNews={setEditingNews}
+                    />
+                  ) : (
+                    <div className="p-6 text-center text-gray-500">Только администратор может открыть админ-панель.</div>
+                  )}
+                </section>
+              )}
+
+            </motion.div>
+          </AnimatePresence>
+
+          {/* Toasts container */}
+          <div className="fixed top-6 right-6 z-50 flex flex-col gap-3">
+            {toast.toasts.map(t => (
+              <motion.div key={t.id} initial={{opacity:0, x:20}} animate={{opacity:1, x:0}} exit={{opacity:0, x:20}} className={`px-4 py-2 rounded-lg shadow ${t.type==='error'?'bg-red-500 text-white':t.type==='success'?'bg-green-500 text-white':'bg-gray-200 text-gray-800'}`}>
+                {t.message}
+              </motion.div>
+            ))}
+          </div>
+
+        </main>
+
+        <footer className="border-t mt-8 py-6">
+          <div className="max-w-6xl mx-auto px-6 text-sm text-gray-500 flex justify-between">
+            <div>© {new Date().getFullYear()} Siper.Ogana</div>
+            <div>Made with pencils ✏️</div>
+          </div>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+// Small components
+function NavItem({label, active, onClick}){
+  return (<button onClick={onClick} className={`px-3 py-1 rounded-md ${active? 'bg-green-700 text-white' : 'text-green-700 hover:bg-green-100'}`}>{label}</button>);
+}
+
+function AuthCard({onLogin,onRegister,onClose}){
+  const [mode,setMode]=useState('login');
+  const [username,setUsername]=useState('');
+  const [password,setPassword]=useState('');
+
+  function submit(e){ e.preventDefault(); if(mode==='login'){ onLogin(username,password); } else { onRegister(username,password); setMode('login'); } }
+
+  return (
+    <motion.div initial={{opacity:0,y:6}} animate={{opacity:1,y:0}} className="max-w-md mx-auto bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-lg">
+      <h3 className="text-xl font-semibold text-green-800 dark:text-green-200 text-center">{mode==='login'?'Вход':'Регистрация'}</h3>
+      <form onSubmit={submit} className="mt-4 space-y-3">
+        <input value={username} onChange={e=>setUsername(e.target.value)} className="w-full p-2 border rounded-lg bg-transparent" placeholder="Логин" />
+        <input value={password} onChange={e=>setPassword(e.target.value)} type="password" className="w-full p-2 border rounded-lg bg-transparent" placeholder="Пароль" />
+        <div className="flex gap-2">
+          <button className="flex-1 px-3 py-2 bg-green-700 text-white rounded-lg">{mode==='login'?'Войти':'Зарегистрироваться'}</button>
+          <button type="button" onClick={()=>setMode(mode==='login'?'register':'login')} className="px-3 py-2 bg-gray-100 rounded-lg">{mode==='login'?'Регистрация':'Войти'}</button>
+        </div>
+      </form>
+    </motion.div>
+  );
+}
+
+function AdminPanel({chapters, news, addChapter, updateChapter, deleteChapter, addNews, updateNews, deleteNews, intro, setIntro, users, changePasswordForUser, toast, editingChapter, setEditingChapter, editingNews, setEditingNews}){
+  return (
+    <div className="space-y-6">
+      <section className="p-4 bg-green-50 rounded-xl">
+        <h4 className="font-semibold">Вступительный текст</h4>
+        <textarea value={intro} onChange={e=>setIntro(e.target.value)} className="w-full mt-2 p-3 rounded-lg border bg-white" rows={3} />
+      </section>
+
+      <section className="p-4 bg-white rounded-xl">
+        <h4 className="font-semibold mb-2">Управление главами</h4>
+        <EditSwitcher type="chapter" items={chapters} add={addChapter} update={updateChapter} remove={deleteChapter} editing={editingChapter} setEditing={setEditingChapter} toast={toast} />
+      </section>
+
+      <section className="p-4 bg-white rounded-xl">
+        <h4 className="font-semibold mb-2">Управление новостями</h4>
+        <EditSwitcher type="news" items={news} add={addNews} update={updateNews} remove={deleteNews} editing={editingNews} setEditing={setEditingNews} toast={toast} />
+      </section>
+
+      <section className="p-4 bg-white rounded-xl">
+        <h4 className="font-semibold mb-2">Пользователи и пароль</h4>
+        <UserPasswordManager users={users} changePasswordForUser={changePasswordForUser} toast={toast} />
+      </section>
+    </div>
+  );
+}
+
+function EditSwitcher({type, items, add, update, remove, editing, setEditing, toast}){
+  return (
+    <div>
+      <div className="flex gap-2 mb-3">
+        <button onClick={()=>setEditing({})} className="px-3 py-1 bg-green-700 text-white rounded">Создать новый</button>
+        {editing && editing.id && <button onClick={()=>setEditing(null)} className="px-3 py-1 bg-gray-100 rounded">Закрыть редактирование</button>}
+      </div>
+      {editing && <Editor type={type} initial={editing} onSave={data=>{ if(editing.id) update(editing.id,data); else add(data); setEditing(null); clearDraft(type, editing.id); }} onCancel={()=>{ setEditing(null); clearDraft(type, editing.id); }} toast={toast} />}
+      <div className="space-y-2">
+        {items.map(item=> (
+          <div key={item.id} className="p-3 border rounded flex justify-between items-start">
+            <div>
+              <div className="font-semibold">{item.title||item.name||'Без названия'}</div>
+              <div className="text-sm text-gray-600">{(item.content||item.body||'').slice(0,160)}{(item.content||item.body||'').length>160?'...':''}</div>
+            </div>
+            <div className="flex flex-col gap-2">
+              <button onClick={()=>setEditing(item)} className="px-2 py-1 bg-green-200 rounded">Ред.</button>
+              <button onClick={()=>remove(item.id)} className="px-2 py-1 bg-red-500 text-white rounded">Удалить</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Editor({type, initial, onSave, onCancel, toast}){
+  const idKey = initial && initial.id ? initial.id : 'new';
+  const draftKey = `siperdraft_${type}_${idKey}`;
+  const [title, setTitle] = useState(initial.title||initial.name||'');
+  const [body, setBody] = useState(initial.content||initial.body||'');
+  const changedRef = useRef(false);
+
+  // Load draft if exists
+  useEffect(()=>{ const d = safeParse(localStorage.getItem(draftKey), null); if(d){ setTitle(d.title||''); setBody(d.body||''); toast.push('Загружен черновик','info'); } },[]);
+
+  // Autosave draft every 2 seconds when changed
+  useEffect(()=>{
+    const t = setInterval(()=>{ if(changedRef.current){ localStorage.setItem(draftKey, JSON.stringify({ title, body })); toast.push('Черновик сохранён','info'); changedRef.current=false; } }, 2000);
+    return ()=>clearInterval(t);
+  },[title,body]);
+
+  function handleSave(e){ e.preventDefault(); if(!title.trim()) return toast.push('Введите заголовок','error'); onSave({ title: title.trim(), content: body.trim(), body: body.trim() }); localStorage.removeItem(draftKey); }
+  function handleCancel(){ onCancel(); localStorage.removeItem(draftKey); }
+
+  return (
+    <motion.form initial={{opacity:0}} animate={{opacity:1}} onSubmit={handleSave} className="bg-green-50 p-4 rounded-lg mb-4">
+      <input value={title} onChange={e=>{ setTitle(e.target.value); changedRef.current=true; }} placeholder="Заголовок" className="w-full p-2 rounded-lg border mb-2" />
+      <textarea value={body} onChange={e=>{ setBody(e.target.value); changedRef.current=true; }} rows={6} placeholder="Текст" className="w-full p-2 rounded-lg border mb-2" />
+      <div className="flex gap-2">
+        <button className="px-4 py-2 bg-green-700 text-white rounded">Сохранить</button>
+        <button type="button" onClick={handleCancel} className="px-4 py-2 bg-gray-100 rounded">Отмена</button>
+      </div>
+    </motion.form>
+  );
+}
+
+function clearDraft(type, id){ try{ localStorage.removeItem(`siperdraft_${type}_${id||'new'}`); }catch(e){} }
+
+function UserPasswordManager({users, changePasswordForUser}){
+  const [username, setUsername] = useState('');
+  const [oldPass, setOldPass] = useState('');
+  const [newPass, setNewPass] = useState('');
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+        <input value={username} onChange={e=>setUsername(e.target.value)} placeholder="Имя пользователя (регистронезависимо)" className="p-2 border rounded" />
+        <input type="password" value={oldPass} onChange={e=>setOldPass(e.target.value)} placeholder="Текущий пароль" className="p-2 border rounded" />
+        <input type="password" value={newPass} onChange={e=>setNewPass(e.target.value)} placeholder="Новый пароль" className="p-2 border rounded" />
+      </div>
+      <div className="flex gap-2">
+        <button onClick={()=>changePasswordForUser(username, oldPass, newPass)} className="px-3 py-1 bg-green-700 text-white rounded">Сменить пароль</button>
+      </div>
+    </div>
+  );
+}
+
+/* End of file */
